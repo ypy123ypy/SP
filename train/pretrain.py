@@ -81,7 +81,7 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None, total_steps=No
             optimizer.zero_grad(set_to_none=True)
 
         global_step = epoch * iters + step
-        
+
         if step % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
@@ -89,7 +89,7 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None, total_steps=No
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
             if swanlab: swanlab.log({"loss": current_loss, "learning_rate": current_lr, "eta_time": eta_min}, step=global_step)
-        
+
         # 保存 checkpoint [DDP] 仅主进程写盘；without_ddp 无 is_main_process() 判断
         if (global_step % args.save_interval == 0 or step == iters - 1) and is_main_process():
             model.eval()
@@ -99,7 +99,7 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None, total_steps=No
             raw_model = model.module if isinstance(model, DistributedDataParallel) else model
             raw_model = getattr(raw_model, '_orig_mod', raw_model)
             state_dict = {k: v.half().cpu() for k, v in raw_model.state_dict().items()}
-            
+
             torch.save(state_dict, f'{ckp_dir}/{args.save_weight}_{lm_config.hidden_size}.pth')
             torch.save({
                 'model': state_dict,
@@ -110,10 +110,10 @@ def train_epoch(epoch, loader, iters, start_step=0, swanlab=None, total_steps=No
                 'global_step': global_step,
                 'swanlab_id': getattr(swanlab, 'id', None) if swanlab else None
             }, f'{ckp_dir}/resume.pth')
-            
+
             Logger(f'Saved checkpoint: {ckp_dir}')
             model.train()
-        
+
         # Benchmark 评测 [DDP] 仅主进程跑；without_ddp 无 is_main_process() 判断
         if args.eval_bench == 1 and tokenizer is not None and global_step % args.eval_interval == 0 and is_main_process():
             model.eval()
@@ -162,12 +162,12 @@ if __name__ == "__main__":
 
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     lm_config = SpongeBobConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers)
-    
+
     # 生成 run_name（用于后续创建子目录）
     run_name = f"h{args.hidden_size}_l{args.num_hidden_layers}_bs{args.batch_size}_lr{args.learning_rate}"
     full_save_dir = os.path.join(args.save_dir, run_name)
     os.makedirs(full_save_dir, exist_ok=True)
-    
+
     # 从最新的 checkpoint 恢复
     ckp_data = None
     if args.from_resume == 1:
@@ -178,20 +178,19 @@ if __name__ == "__main__":
             if os.path.exists(resume_path):
                 ckp_data = torch.load(resume_path, map_location='cpu')
                 Logger(f'Found checkpoint: {full_save_dir}/{latest_ckp}')
-    
+
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=dtype)
-    
+
     # ========== 4. 配置swanlab ==========
     swanlab_run = None
     if args.use_swanlab and is_main_process():  # [DDP] 仅主进程上报；without_ddp 无 is_main_process()
         import swanlab
-        swanlab.login(api_key="4jqfbuJs9zDRcLAMPoDQv")
-        
+        swanlab.login(api_key="5FRD3A6lv7iNVYZypEIal")
         swanlab_id = ckp_data.get('swanlab_id') if ckp_data else None
-        
+
         swanlab_run = swanlab.init(
             project=args.swanlab_project,
             experiment_name=run_name,
@@ -200,7 +199,7 @@ if __name__ == "__main__":
             config=vars(args)
         )
         Logger(f'SwanLab initialized: {run_name}')
-    
+
     # ========== 5. 定义模型、数据、优化器 ==========
     # 创建模型
     if args.from_weight != 'none' and os.path.exists(args.from_weight):
@@ -209,10 +208,10 @@ if __name__ == "__main__":
     else:
         Logger(f'Creating new model: hidden_size={args.hidden_size}, num_layers={args.num_hidden_layers}')
         model = SpongeBobForCausalLM(lm_config)
-    
+
     model = model.to(args.device)
     Logger(f'Model parameters: {sum(p.numel() for p in model.parameters())/1e6:.2f}M')
-    
+
     # 加载 tokenizer（用于 benchmark 评测）
     if args.eval_bench == 1:
         from transformers import AutoTokenizer
@@ -220,24 +219,24 @@ if __name__ == "__main__":
         Logger('Tokenizer loaded for benchmark evaluation')
     else:
         tokenizer = None
-    
+
     if args.use_compile == 1:
         model = torch.compile(model)
         Logger('torch.compile enabled')
-    
+
     # 数据集（加载预处理好的.bin文件）
     Logger('Loading dataset...')
     train_ds = PretrainDataset(args.data_path, seq_len=args.max_seq_len)
     # [DDP] 多卡用 DistributedSampler 分片；without_ddp 无 train_sampler，后面用 indices
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     Logger('Dataset ready')
-    
+
     # 优化器
     Logger('Initializing optimizer...')
     scaler = torch.amp.GradScaler('cuda', enabled=(args.dtype == 'float16'))
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.1)
     Logger('Optimizer ready')
-    
+
     # ========== 6. 从ckp恢复状态 ==========
     start_epoch, start_step = 0, 0
     if ckp_data:
@@ -252,7 +251,7 @@ if __name__ == "__main__":
         start_epoch = ckp_data['epoch']
         start_step = ckp_data.get('step', 0)
         Logger(f'Checkpoint loaded: epoch={start_epoch}, step={start_step}')
-    
+
     # ========== 7. [DDP] DDP 包模型 ==========
     # without_ddp 无此整段，不包 DDP
     if dist.is_initialized():
@@ -269,7 +268,7 @@ if __name__ == "__main__":
     warmup_steps = int(total_steps * 0.03)  # 3% warmup
     Logger(f'World size: {world_size}, Steps per epoch: {steps_per_epoch}')
     Logger(f'Total training steps: {total_steps}, Warmup steps: {warmup_steps} (3%)')
-    
+
     # ========== 8.5. 初始评测 (step 0) ==========
     # [DDP] 仅主进程评测；without_ddp 无 is_main_process()
     if args.eval_bench == 1 and tokenizer is not None and is_main_process() and start_epoch == 0 and start_step == 0:
@@ -282,7 +281,7 @@ if __name__ == "__main__":
             swanlab_run.log(eval_results, step=0)
         Logger(f'Initial benchmark results (step 0): {eval_results}')
         model.train()
-    
+
     # ========== 9. 开始训练 ==========
     Logger(f'Starting training: {args.epochs} epochs, batch_size={args.batch_size}')
     for epoch in range(start_epoch, args.epochs):
@@ -297,12 +296,12 @@ if __name__ == "__main__":
         Logger(f'Creating DataLoader for epoch {epoch+1}...')
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
         Logger(f'DataLoader ready, starting epoch {epoch+1}...')
-        if skip > 0: 
+        if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
             train_epoch(epoch, loader, len(loader) + skip, start_step, swanlab_run, total_steps, warmup_steps, full_save_dir)
         else:
             train_epoch(epoch, loader, len(loader), 0, swanlab_run, total_steps, warmup_steps, full_save_dir)
-    
+
     # ========== 10. [DDP] 清理分布式进程组 ==========
     # without_ddp 无此步骤，仅 Logger('Training done.')
     if dist.is_initialized(): dist.destroy_process_group()
